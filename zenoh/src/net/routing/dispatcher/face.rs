@@ -241,14 +241,6 @@ impl FaceState {
         }
     }
 
-    pub(crate) fn get_next_local_id(&self) -> ExprId {
-        let mut id = 1;
-        while self.local_mappings.contains_key(&id) || self.remote_mappings.contains_key(&id) {
-            id += 1;
-        }
-        id
-    }
-
     pub(crate) fn update_interceptors_caches(&self, res: &mut Arc<Resource>) {
         if let Some(interceptor) = self.in_interceptors.as_ref().map(|itor| itor.load()) {
             if let Some(interceptor) = interceptor.as_ref() {

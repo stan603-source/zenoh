@@ -26,10 +26,7 @@ use zenoh_collections::{IntHashMap, IntHashSet, SingleOrBoxHashSet};
 use zenoh_protocol::{
     core::{key_expr::keyexpr, ExprId, Region, WireExpr},
     network::{
-        self,
-        declare::{self, queryable::ext::QueryableInfoType, Declare, DeclareBody, DeclareKeyExpr},
-        interest::InterestId,
-        Mapping, RequestId,
+        self, declare::queryable::ext::QueryableInfoType, interest::InterestId, Mapping, RequestId,
     },
 };
 use zenoh_sync::{get_mut_unchecked, Cache, CacheValueType};
@@ -46,7 +43,6 @@ use crate::net::routing::{
         tables::{RoutingExpr, Tables},
     },
     interceptor::{InterceptorTrait, InterceptorsChain},
-    RoutingContext,
 };
 
 pub(crate) type NodeId = u16;
@@ -503,22 +499,6 @@ impl Resource {
         })
     }
 
-    pub fn nonwild_prefix(res: &Arc<Resource>) -> (Option<Arc<Resource>>, String) {
-        match &res.nonwild_prefix {
-            None => (Some(res.clone()), "".to_string()),
-            Some(nonwild_prefix) => {
-                if !nonwild_prefix.expr().is_empty() {
-                    (
-                        Some(nonwild_prefix.clone()),
-                        res.expr[nonwild_prefix.expr.len()..].to_string(),
-                    )
-                } else {
-                    (None, res.expr().to_string())
-                }
-            }
-        }
-    }
-
     pub fn root() -> Arc<Resource> {
         Arc::new(Resource {
             parent: None,
@@ -658,74 +638,11 @@ impl Resource {
     }
 
     #[inline]
-    pub fn decl_key(res: &Arc<Resource>, face: &mut Arc<FaceState>) -> WireExpr<'static> {
-        if face.is_local {
-            return res.expr().to_string().into();
-        }
-
-        let (nonwild_prefix, wildsuffix) = Resource::nonwild_prefix(res);
-        match nonwild_prefix {
-            Some(mut nonwild_prefix) => {
-                if let Some(ctx) = get_mut_unchecked(&mut nonwild_prefix)
-                    .face_ctxs
-                    .get(&face.id)
-                {
-                    if let Some(expr_id) = ctx.remote_expr_id {
-                        return WireExpr {
-                            scope: expr_id,
-                            suffix: wildsuffix.into(),
-                            mapping: Mapping::Receiver,
-                        };
-                    }
-                    if let Some(expr_id) = ctx.local_expr_id {
-                        return WireExpr {
-                            scope: expr_id,
-                            suffix: wildsuffix.into(),
-                            mapping: Mapping::Sender,
-                        };
-                    }
-                }
-                if face.region.bound().is_north()
-                    || face.remote_key_interests.values().any(|res| {
-                        res.as_ref()
-                            .map(|res| res.matches(&nonwild_prefix))
-                            .unwrap_or(true)
-                    })
-                {
-                    let ctx = get_mut_unchecked(&mut nonwild_prefix)
-                        .face_ctxs
-                        .entry(face.id)
-                        .or_insert_with(|| Arc::new(FaceContext::new(face.clone())));
-                    let expr_id = face.get_next_local_id();
-                    get_mut_unchecked(ctx).local_expr_id = Some(expr_id);
-                    get_mut_unchecked(face)
-                        .local_mappings
-                        .insert(expr_id, nonwild_prefix.clone());
-                    face.primitives.send_declare(RoutingContext::with_expr(
-                        &mut Declare {
-                            interest_id: None,
-                            ext_qos: declare::ext::QoSType::DECLARE,
-                            ext_tstamp: None,
-                            ext_nodeid: declare::ext::NodeIdType::DEFAULT,
-                            body: DeclareBody::DeclareKeyExpr(DeclareKeyExpr {
-                                id: expr_id,
-                                wire_expr: nonwild_prefix.expr().to_string().into(),
-                            }),
-                        },
-                        nonwild_prefix.expr().to_string(),
-                    ));
-                    face.update_interceptors_caches(&mut nonwild_prefix);
-                    WireExpr {
-                        scope: expr_id,
-                        suffix: wildsuffix.into(),
-                        mapping: Mapping::Sender,
-                    }
-                } else {
-                    res.expr().to_string().into()
-                }
-            }
-            None => wildsuffix.into(),
-        }
+    pub fn decl_key(res: &Arc<Resource>, _face: &mut Arc<FaceState>) -> WireExpr<'static> {
+        // Declaration mappings and declarations that reference them use independent transport
+        // messages. Sending the complete expression avoids an ordering dependency that cannot be
+        // guaranteed while routed faces or their links are changing.
+        res.expr().to_string().into()
     }
 
     /// Return the best locally/remotely declared keyexpr, i.e. with the smallest suffix, matching
@@ -745,6 +662,13 @@ impl Resource {
             sid: usize,
         ) -> Option<WireExpr<'a>> {
             let ctx = prefix.face_ctxs.get(&sid)?;
+            // A declared expression and traffic using it are sent independently. Across routed
+            // transport faces, topology or link churn can reorder them and leave the receiver
+            // unable to resolve the scoped expression. Keep transport messages self-contained;
+            // local sessions do not cross that asynchronous boundary and retain compression.
+            if !ctx.face.is_local {
+                return None;
+            }
             let (scope, mapping) = match (ctx.remote_expr_id, ctx.local_expr_id) {
                 (Some(expr_id), _) => (expr_id, Mapping::Receiver),
                 (_, Some(expr_id)) => (expr_id, Mapping::Sender),
