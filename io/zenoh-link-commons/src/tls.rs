@@ -1,16 +1,38 @@
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
 use rustls::{
     client::{
         danger::{ServerCertVerified, ServerCertVerifier},
         verify_server_cert_signed_by_trust_anchor,
     },
-    crypto::{verify_tls12_signature, verify_tls13_signature},
+    crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
     pki_types::{CertificateDer, ServerName, UnixTime},
     server::ParsedCertificate,
     RootCertStore,
 };
-use webpki::ALL_VERIFICATION_ALGS;
+
+/// The rustls provider for Zenoh TLS links.
+///
+/// With the `pqc` feature, links use aws-lc-rs restricted to a TLS 1.3 profile aligned with
+/// CNSA 2.0: ML-KEM-1024 (FIPS 203) is the only key establishment and AES-256-GCM with
+/// SHA-384 the only cipher suite, so a peer that cannot negotiate ML-KEM-1024 fails the
+/// handshake. Certificate and handshake signatures may use ML-DSA (FIPS 204); the configured
+/// trust anchors decide whether authentication is post-quantum.
+#[cfg(feature = "pqc")]
+pub fn crypto_provider() -> Arc<CryptoProvider> {
+    use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
+    Arc::new(CryptoProvider {
+        cipher_suites: vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+        kx_groups: vec![kx_group::MLKEM1024],
+        ..default_provider()
+    })
+}
+
+/// The rustls provider for Zenoh TLS links.
+#[cfg(not(feature = "pqc"))]
+pub fn crypto_provider() -> Arc<CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
 
 pub mod config {
     pub const TLS_ROOT_CA_CERTIFICATE_FILE: &str = "root_ca_certificate_file";
@@ -65,7 +87,7 @@ impl ServerCertVerifier for WebPkiVerifierAnyServerName {
             &self.roots,
             intermediates,
             now,
-            ALL_VERIFICATION_ALGS,
+            self.provider.signature_verification_algorithms.all,
         )?;
         Ok(ServerCertVerified::assertion())
     }
@@ -80,7 +102,7 @@ impl ServerCertVerifier for WebPkiVerifierAnyServerName {
             message,
             cert,
             dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            &self.provider.signature_verification_algorithms,
         )
     }
 
@@ -94,12 +116,12 @@ impl ServerCertVerifier for WebPkiVerifierAnyServerName {
             message,
             cert,
             dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            &self.provider.signature_verification_algorithms,
         )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
+        self.provider
             .signature_verification_algorithms
             .supported_schemes()
     }
@@ -110,15 +132,17 @@ impl ServerCertVerifier for WebPkiVerifierAnyServerName {
 #[derive(Debug)]
 pub struct WebPkiVerifierAnyServerName {
     roots: RootCertStore,
+    provider: Arc<CryptoProvider>,
 }
 
 #[allow(unreachable_pub)]
 impl WebPkiVerifierAnyServerName {
     /// Constructs a new `WebPkiVerifierAnyServerName`.
     ///
-    /// `roots` is the set of trust anchors to trust for issuing server certs.
-    pub fn new(roots: RootCertStore) -> Self {
-        Self { roots }
+    /// `roots` is the set of trust anchors to trust for issuing server certs, and `provider`
+    /// supplies the signature algorithms used to verify them.
+    pub fn new(roots: RootCertStore, provider: Arc<CryptoProvider>) -> Self {
+        Self { roots, provider }
     }
 }
 

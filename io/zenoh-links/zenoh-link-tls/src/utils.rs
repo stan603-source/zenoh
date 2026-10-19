@@ -36,7 +36,7 @@ use zenoh_link_commons::{
     tcp::TcpSocketConfig,
     tls::{
         config::{self, *},
-        WebPkiVerifierAnyServerName,
+        crypto_provider, WebPkiVerifierAnyServerName,
     },
     ConfigurationInspector, BIND_INTERFACE, BIND_SOCKET, TCP_SO_RCV_BUF, TCP_SO_SND_BUF,
 };
@@ -225,28 +225,26 @@ impl<'a> TlsServerConfig<'a> {
             bail!("No private key found for TLS server.");
         }
 
-        // Install ring based rustls CryptoProvider.
-        rustls::crypto::ring::default_provider()
-            // This can be called successfully at most once in any process execution.
-            // Call this early in your process to configure which provider is used for the provider.
-            // The configuration should happen before any use of ClientConfig::builder() or ServerConfig::builder().
-            .install_default()
-            // Ignore the error here, because `rustls::crypto::ring::default_provider().install_default()` will inevitably be executed multiple times
-            // when there are multiple quic links, and all but the first execution will fail.
-            .ok();
+        let provider = crypto_provider();
 
         let sc = if tls_server_client_auth {
             let root_cert_store = load_trust_anchors(config)?.map_or_else(
                 || Err(zerror!("Missing root certificates while mTLS is enabled.")),
                 Ok,
             )?;
-            let client_auth = WebPkiClientVerifier::builder(root_cert_store.into()).build()?;
-            ServerConfig::builder_with_protocol_versions(&[&TLS13])
+            let client_auth = WebPkiClientVerifier::builder_with_provider(
+                root_cert_store.into(),
+                provider.clone(),
+            )
+            .build()?;
+            ServerConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&TLS13])?
                 .with_client_cert_verifier(client_auth)
                 .with_single_cert(certs, keys.remove(0))
                 .map_err(|e| zerror!(e))?
         } else {
-            ServerConfig::builder()
+            ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()?
                 .with_no_client_auth()
                 .with_single_cert(certs, keys.remove(0))
                 .map_err(|e| zerror!(e))?
@@ -357,15 +355,7 @@ impl<'a> TlsClientConfig<'a> {
             root_cert_store.extend(custom_root_cert.roots);
         }
 
-        // Install ring based rustls CryptoProvider.
-        rustls::crypto::ring::default_provider()
-            // This can be called successfully at most once in any process execution.
-            // Call this early in your process to configure which provider is used for the provider.
-            // The configuration should happen before any use of ClientConfig::builder() or ServerConfig::builder().
-            .install_default()
-            // Ignore the error here, because `rustls::crypto::ring::default_provider().install_default()` will inevitably be executed multiple times
-            // when there are multiple quic links, and all but the first execution will fail.
-            .ok();
+        let provider = crypto_provider();
 
         let cc = if tls_client_server_auth {
             tracing::debug!("Loading client authentication key and certificate...");
@@ -402,7 +392,8 @@ impl<'a> TlsClientConfig<'a> {
                 bail!("No private key found for TLS client.");
             }
 
-            let builder = ClientConfig::builder_with_protocol_versions(&[&TLS13]);
+            let builder = ClientConfig::builder_with_provider(provider.clone())
+                .with_protocol_versions(&[&TLS13])?;
 
             if tls_server_name_verification {
                 builder
@@ -413,12 +404,14 @@ impl<'a> TlsClientConfig<'a> {
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(WebPkiVerifierAnyServerName::new(
                         root_cert_store,
+                        provider,
                     )))
                     .with_client_auth_cert(certs, keys.remove(0))
             }
             .map_err(|e| zerror!("Bad certificate/key: {}", e))?
         } else {
-            let builder = ClientConfig::builder();
+            let builder = ClientConfig::builder_with_provider(provider.clone())
+                .with_safe_default_protocol_versions()?;
             if tls_server_name_verification {
                 builder
                     .with_root_certificates(root_cert_store)
@@ -428,6 +421,7 @@ impl<'a> TlsClientConfig<'a> {
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(WebPkiVerifierAnyServerName::new(
                         root_cert_store,
+                        provider,
                     )))
                     .with_no_client_auth()
             }
@@ -604,4 +598,136 @@ pub fn get_tls_host<'a>(address: &'a Address<'a>) -> ZResult<&'a str> {
 
 pub fn get_tls_server_name<'a>(address: &'a Address<'a>) -> ZResult<ServerName<'a>> {
     Ok(ServerName::try_from(get_tls_host(address)?).map_err(|e| zerror!(e))?)
+}
+
+#[cfg(all(test, feature = "pqc"))]
+mod pqc_tests {
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+        PKCS_ML_DSA_87,
+    };
+    use rustls::{crypto::aws_lc_rs, NamedGroup};
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
+    use zenoh_protocol::core::EndPoint;
+
+    use super::*;
+
+    struct Pki {
+        ca: String,
+        server: (String, String),
+        client: (String, String),
+    }
+
+    fn ml_dsa_pki() -> Pki {
+        let ca_key = KeyPair::generate_for(&PKCS_ML_DSA_87).unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap().pem();
+        let issuer = Issuer::new(ca_params, ca_key);
+        let leaf = || {
+            let key = KeyPair::generate_for(&PKCS_ML_DSA_87).unwrap();
+            let mut params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+            params.extended_key_usages = vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth,
+            ];
+            let cert = params.signed_by(&key, &issuer).unwrap().pem();
+            (cert, key.serialize_pem())
+        };
+        Pki {
+            ca,
+            server: leaf(),
+            client: leaf(),
+        }
+    }
+
+    fn endpoint(pki: &Pki, verify_name: &str) -> EndPoint {
+        let mut endpoint: EndPoint = "tls/localhost:0".parse().unwrap();
+        endpoint
+            .config_mut()
+            .extend_from_iter(
+                [
+                    (TLS_ROOT_CA_CERTIFICATE_RAW, pki.ca.as_str()),
+                    (TLS_LISTEN_CERTIFICATE_RAW, pki.server.0.as_str()),
+                    (TLS_LISTEN_PRIVATE_KEY_RAW, pki.server.1.as_str()),
+                    (TLS_CONNECT_CERTIFICATE_RAW, pki.client.0.as_str()),
+                    (TLS_CONNECT_PRIVATE_KEY_RAW, pki.client.1.as_str()),
+                    (TLS_ENABLE_MTLS, "true"),
+                    (TLS_VERIFY_NAME_ON_CONNECT, verify_name),
+                ]
+                .iter()
+                .copied(),
+            )
+            .unwrap();
+        endpoint
+    }
+
+    #[tokio::test]
+    async fn mtls_uses_ml_kem_1024_and_ml_dsa_certificates() {
+        let pki = ml_dsa_pki();
+        for verify_name in ["true", "false"] {
+            let endpoint = endpoint(&pki, verify_name);
+            let config = endpoint.config();
+            let server = TlsServerConfig::new(&config).await.unwrap();
+            let client = TlsClientConfig::new(&config).await.unwrap();
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            let acceptor = TlsAcceptor::from(Arc::new(server.server_config));
+            let connector = TlsConnector::from(Arc::new(client.client_config));
+            let name = ServerName::try_from("localhost").unwrap();
+            let (server, client) = tokio::join!(
+                acceptor.accept(server_io),
+                connector.connect(name, client_io)
+            );
+            let (_, server) = server.unwrap().into_inner();
+            let (_, client) = client.unwrap().into_inner();
+            for (group, suite) in [
+                (
+                    server.negotiated_key_exchange_group(),
+                    server.negotiated_cipher_suite(),
+                ),
+                (
+                    client.negotiated_key_exchange_group(),
+                    client.negotiated_cipher_suite(),
+                ),
+            ] {
+                assert_eq!(group.unwrap().name(), NamedGroup::MLKEM1024);
+                assert_eq!(
+                    suite.unwrap().suite(),
+                    rustls::CipherSuite::TLS13_AES_256_GCM_SHA384
+                );
+            }
+            assert_eq!(server.peer_certificates().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn classical_key_exchange_is_refused() {
+        let pki = ml_dsa_pki();
+        let endpoint = endpoint(&pki, "true");
+        let config = endpoint.config();
+        let server = TlsServerConfig::new(&config).await.unwrap();
+        let client = TlsClientConfig::new(&config).await.unwrap();
+        let classical = rustls::crypto::CryptoProvider {
+            kx_groups: vec![aws_lc_rs::kx_group::X25519, aws_lc_rs::kx_group::SECP384R1],
+            ..aws_lc_rs::default_provider()
+        };
+        let mut client_config = ClientConfig::builder_with_provider(Arc::new(classical))
+            .with_protocol_versions(&[&TLS13])
+            .unwrap()
+            .with_root_certificates(load_trust_anchors(&config).unwrap().unwrap())
+            .with_no_client_auth();
+        // Same client identity, only the key exchange differs.
+        client_config.client_auth_cert_resolver = client.client_config.client_auth_cert_resolver;
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let acceptor = TlsAcceptor::from(Arc::new(server.server_config));
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let name = ServerName::try_from("localhost").unwrap();
+        let (server, client) = tokio::join!(
+            acceptor.accept(server_io),
+            connector.connect(name, client_io)
+        );
+        let error = server.unwrap_err().to_string();
+        assert!(error.contains("NoKxGroupsInCommon"), "{error}");
+        assert!(client.is_err());
+    }
 }

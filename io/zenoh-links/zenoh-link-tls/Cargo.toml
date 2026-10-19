@@ -25,6 +25,7 @@ version = { workspace = true }
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
+pqc = ["zenoh-link-commons/pqc"]
 uring = []
 
 [dependencies]
@@ -50,6 +51,10 @@ zenoh-link-commons = { workspace = true, features = ["tls"] }
 zenoh-protocol = { workspace = true }
 zenoh-result = { workspace = true }
 zenoh-runtime = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true, features = ["aws_lc_rs_unstable"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [package.metadata.cargo-machete]
 ignored = ["rustls-webpki"]

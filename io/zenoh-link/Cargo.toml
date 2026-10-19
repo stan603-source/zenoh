@@ -30,6 +30,7 @@ transport_quic_datagram = ["zenoh-link-quic_datagram"]
 transport_serial = ["zenoh-link-serial"]
 transport_tcp = ["zenoh-config/transport_tcp", "zenoh-link-tcp"]
 transport_tls = ["zenoh-link-tls"]
+transport_tls_pqc = ["transport_tls", "zenoh-link-tls/pqc"]
 transport_udp = ["zenoh-link-udp"]
 transport_unixpipe = [
   "zenoh-link-unixpipe",
