@@ -71,6 +71,8 @@ transport_quic_datagram = ["zenoh-transport/transport_quic_datagram"]
 transport_serial = ["zenoh-transport/transport_serial"]
 transport_tcp = ["zenoh-config/transport_tcp", "zenoh-transport/transport_tcp"]
 transport_tls = ["zenoh-transport/transport_tls"]
+# TLS links use ML-KEM-1024 key establishment and accept ML-DSA certificates (aws-lc-rs).
+transport_tls_pqc = ["transport_tls", "zenoh-transport/transport_tls_pqc"]
 transport_udp = ["zenoh-transport/transport_udp"]
 transport_unixpipe = ["zenoh-transport/transport_unixpipe"]
 transport_unixsock-stream = ["zenoh-transport/transport_unixsock-stream"]

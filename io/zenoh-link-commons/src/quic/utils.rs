@@ -453,6 +453,7 @@ impl TlsClientConfig {
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(WebPkiVerifierAnyServerName::new(
                         root_cert_store,
+                        Arc::new(rustls::crypto::ring::default_provider()),
                     )))
                     .with_client_auth_cert(certs, keys.remove(0))
             }
@@ -468,6 +469,7 @@ impl TlsClientConfig {
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(WebPkiVerifierAnyServerName::new(
                         root_cert_store,
+                        Arc::new(rustls::crypto::ring::default_provider()),
                     )))
                     .with_no_client_auth()
             }
