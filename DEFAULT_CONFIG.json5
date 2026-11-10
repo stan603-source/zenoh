@@ -721,7 +721,8 @@
         verify_name_on_connect: true,
         /// Whether the connecting side also trusts the bundled Web PKI root certificates.
         /// When not set, they are trusted only if no root_ca_certificate is configured, so a
-        /// private CA is not silently combined with the public roots.
+        /// private CA is not silently combined with the public roots. TLS links only: QUIC links
+        /// still combine the Web PKI roots with root_ca_certificate.
         // web_pki_roots: false,
         /// Whether or not to close links when remote certificates expires.
         /// If set to true, links that require certificates (tls/quic) will automatically disconnect when the time of expiration of the remote certificate chain is reached

@@ -663,4 +663,32 @@ mod web_pki_roots_tests {
         );
         assert_eq!(roots(&[(TLS_WEB_PKI_ROOTS, "false")]), 0);
     }
+
+    #[test]
+    fn the_config_option_reaches_the_link_and_bad_values_fail_closed() {
+        use zenoh_config::Config as ZenohConfig;
+        use zenoh_link_commons::ConfigurationInspector;
+
+        use super::TlsConfigurator;
+
+        let mut config = ZenohConfig::default();
+        config
+            .insert_json5("transport/link/tls/web_pki_roots", "false")
+            .unwrap();
+        let params = TlsConfigurator.inspect_config(&config).unwrap();
+        assert!(params.contains("web_pki_roots=false"), "{params}");
+        assert!(!TlsConfigurator
+            .inspect_config(&ZenohConfig::default())
+            .unwrap()
+            .contains("web_pki_roots"));
+        assert!(ZenohConfig::default()
+            .insert_json5("transport/link/tls/web_pki_roots", "\"maybe\"")
+            .is_err());
+        let mut endpoint: EndPoint = "tls/localhost:7447".parse().unwrap();
+        endpoint
+            .config_mut()
+            .extend_from_iter([(TLS_WEB_PKI_ROOTS, "maybe")].iter().copied())
+            .unwrap();
+        assert!(client_root_store(&endpoint.config()).is_err());
+    }
 }

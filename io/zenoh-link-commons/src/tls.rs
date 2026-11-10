@@ -41,7 +41,8 @@ pub mod config {
 
     /// Whether a connecting side also trusts the bundled Web PKI roots. When unset, they are
     /// trusted only if no root CA certificate is configured, so pinning a private CA does not
-    /// silently add the public roots.
+    /// silently add the public roots. Applies to TLS links only; QUIC links still combine the
+    /// Web PKI roots with the configured root CA.
     pub const TLS_WEB_PKI_ROOTS: &str = "web_pki_roots";
 
     pub const TLS_CLOSE_LINK_ON_EXPIRATION: &str = "close_link_on_expiration";
