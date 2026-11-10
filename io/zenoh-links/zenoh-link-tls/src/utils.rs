@@ -148,6 +148,12 @@ impl ConfigurationInspector<ZenohConfig> for TlsConfigurator {
             false => ps.push((TLS_VERIFY_NAME_ON_CONNECT, "false")),
         };
 
+        match c.web_pki_roots() {
+            Some(true) => ps.push((TLS_WEB_PKI_ROOTS, "true")),
+            Some(false) => ps.push((TLS_WEB_PKI_ROOTS, "false")),
+            None => {}
+        }
+
         match c
             .close_link_on_expiration()
             .unwrap_or(TLS_CLOSE_LINK_ON_EXPIRATION_DEFAULT)
@@ -346,16 +352,7 @@ impl<'a> TlsClientConfig<'a> {
             None => TLS_CLOSE_LINK_ON_EXPIRATION_DEFAULT,
         };
 
-        // Allows mixed user-generated CA and webPKI CA
-        tracing::debug!("Loading default Web PKI certificates.");
-        let mut root_cert_store = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-
-        if let Some(custom_root_cert) = load_trust_anchors(config)? {
-            tracing::debug!("Loading user-generated certificates.");
-            root_cert_store.extend(custom_root_cert.roots);
-        }
+        let root_cert_store = client_root_store(config)?;
 
         // Install ring based rustls CryptoProvider.
         rustls::crypto::ring::default_provider()
@@ -554,6 +551,29 @@ async fn load_tls_certificate(
     Err(zerror!("Missing tls certificates.").into())
 }
 
+/// Trust anchors for the connecting side: the configured root CA, plus the bundled Web PKI
+/// roots when `web_pki_roots` is true. When `web_pki_roots` is unset, the Web PKI roots are
+/// used only if no root CA is configured.
+fn client_root_store(config: &Config<'_>) -> ZResult<RootCertStore> {
+    let custom_roots = load_trust_anchors(config)?;
+    let web_pki_roots = match config.get(TLS_WEB_PKI_ROOTS) {
+        Some(s) => s
+            .parse()
+            .map_err(|_| zerror!("Unknown Web PKI roots argument: {}", s))?,
+        None => custom_roots.is_none(),
+    };
+    let mut root_cert_store = RootCertStore::empty();
+    if web_pki_roots {
+        tracing::debug!("Loading default Web PKI certificates.");
+        root_cert_store.roots = webpki_roots::TLS_SERVER_ROOTS.to_vec();
+    }
+    if let Some(custom_roots) = custom_roots {
+        tracing::debug!("Loading user-generated certificates.");
+        root_cert_store.extend(custom_roots.roots);
+    }
+    Ok(root_cert_store)
+}
+
 fn load_trust_anchors(config: &Config<'_>) -> ZResult<Option<RootCertStore>> {
     let mut root_cert_store = RootCertStore::empty();
     if let Some(value) = config.get(TLS_ROOT_CA_CERTIFICATE_RAW) {
@@ -604,4 +624,43 @@ pub fn get_tls_host<'a>(address: &'a Address<'a>) -> ZResult<&'a str> {
 
 pub fn get_tls_server_name<'a>(address: &'a Address<'a>) -> ZResult<ServerName<'a>> {
     Ok(ServerName::try_from(get_tls_host(address)?).map_err(|e| zerror!(e))?)
+}
+
+#[cfg(test)]
+mod web_pki_roots_tests {
+    use zenoh_link_commons::tls::config::{TLS_ROOT_CA_CERTIFICATE_RAW, TLS_WEB_PKI_ROOTS};
+    use zenoh_protocol::core::EndPoint;
+
+    use super::client_root_store;
+
+    const CA: &str = include_str!("../tests/data/minica-root.pem");
+
+    fn roots(params: &[(&str, &str)]) -> usize {
+        let mut endpoint: EndPoint = "tls/localhost:7447".parse().unwrap();
+        endpoint
+            .config_mut()
+            .extend_from_iter(params.iter().copied())
+            .unwrap();
+        client_root_store(&endpoint.config()).unwrap().len()
+    }
+
+    #[test]
+    fn a_configured_root_ca_is_the_only_trust_anchor_by_default() {
+        assert_eq!(roots(&[(TLS_ROOT_CA_CERTIFICATE_RAW, CA)]), 1);
+    }
+
+    #[test]
+    fn web_pki_roots_are_used_without_a_root_ca_or_when_enabled() {
+        let web = webpki_roots::TLS_SERVER_ROOTS.len();
+        assert!(web > 1);
+        assert_eq!(roots(&[]), web);
+        assert_eq!(
+            roots(&[
+                (TLS_ROOT_CA_CERTIFICATE_RAW, CA),
+                (TLS_WEB_PKI_ROOTS, "true")
+            ]),
+            web + 1
+        );
+        assert_eq!(roots(&[(TLS_WEB_PKI_ROOTS, "false")]), 0);
+    }
 }
