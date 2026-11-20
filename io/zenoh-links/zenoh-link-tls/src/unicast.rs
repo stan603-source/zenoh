@@ -14,7 +14,6 @@
 #[cfg(all(feature = "uring", target_os = "linux"))]
 use std::os::fd::RawFd;
 use std::{
-    convert::TryInto,
     fmt::{self, Debug},
     net::SocketAddr,
     sync::Arc,
@@ -47,7 +46,7 @@ use zenoh_result::{zerror, ZResult};
 
 use crate::{
     utils::{get_tls_addr, get_tls_host, get_tls_server_name, TlsClientConfig, TlsServerConfig},
-    TLS_ACCEPT_THROTTLE_TIME, TLS_DEFAULT_MTU, TLS_LINGER_TIMEOUT, TLS_LOCATOR_PREFIX,
+    TLS_ACCEPT_THROTTLE_TIME, TLS_DEFAULT_MTU, TLS_LOCATOR_PREFIX,
 };
 
 #[derive(Default, Debug, PartialEq, Eq, Hash)]
@@ -97,18 +96,12 @@ impl LinkUnicastTls {
             );
         }
 
-        // Set the TLS linger option
-        #[allow(deprecated)]
-        if let Err(err) = tcp_stream.set_linger(Some(Duration::from_secs(
-            (*TLS_LINGER_TIMEOUT).try_into().unwrap(),
-        ))) {
-            tracing::warn!(
-                "Unable to set LINGER option on TLS link {} => {}: {}",
-                src_addr,
-                dst_addr,
-                err
-            );
-        }
+        // No SO_LINGER (LOOM fork): with a linger timeout, close() blocks the
+        // calling runtime thread until unsent data is acknowledged or the
+        // timeout ends, so closing a link to an unreachable peer stalled a
+        // Zenoh RX worker, and every other session on it, for the whole
+        // timeout. Without it close() returns at once and the kernel still
+        // delivers the queued bytes and the FIN in the background.
 
         // Compute the MTU
         // See IETF RFC6691: https://datatracker.ietf.org/doc/rfc6691/
